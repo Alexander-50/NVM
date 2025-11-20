@@ -1,0 +1,5 @@
+.env
+*.pyc
+core/__pycache__/
+reports/__pycache__/
+data/cve_cache.json
