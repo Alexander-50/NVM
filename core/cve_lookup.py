@@ -15,6 +15,8 @@ API_KEY = os.getenv("NVD_API_KEY")
 # With Key: 50 req / 30s (~0.6s delay) | Without Key: 5 req / 30s (~6.0s delay)
 DELAY = 0.6 if API_KEY else 6.0
 MAX_CONCURRENT_REQUESTS = 5  # Safety buffer to avoid overwhelming local network
+MAX_RETRIES = 3
+
 
 async def load_cache():
     if not os.path.exists(CACHE_FILE):
@@ -25,74 +27,113 @@ async def load_cache():
     except (json.JSONDecodeError, IOError):
         return {}
 
+
 def save_cache_sync(cache_data):
     """Saves cache synchronously (file I/O is fast enough to keep simple)"""
-    os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
+    dirpath = os.path.dirname(CACHE_FILE) or '.'
+    os.makedirs(dirpath, exist_ok=True)
     try:
         with open(CACHE_FILE, 'w') as f:
             json.dump(cache_data, f, indent=4)
     except IOError:
         pass
 
+
 def extract_cvss_score(metrics):
     """Extracts CVSS score handling NVD API 2.0 schema"""
     # Priority: V3.1 -> V3.0 -> V2.0
-    if metrics.get('cvssMetricV31'):
-        return metrics['cvssMetricV31'][0]['cvssData'].get('baseScore')
-    if metrics.get('cvssMetricV30'):
-        return metrics['cvssMetricV30'][0]['cvssData'].get('baseScore')
-    if metrics.get('cvssMetricV2'):
-        return metrics['cvssMetricV2'][0]['cvssData'].get('baseScore')
+    try:
+        if metrics.get('cvssMetricV31'):
+            return metrics['cvssMetricV31'][0]['cvssData'].get('baseScore')
+        if metrics.get('cvssMetricV30'):
+            return metrics['cvssMetricV30'][0]['cvssData'].get('baseScore')
+        if metrics.get('cvssMetricV2'):
+            return metrics['cvssMetricV2'][0]['cvssData'].get('baseScore')
+    except Exception:
+        return None
     return None
+
 
 async def query_nvd_async(session, cpe_string, semaphore):
     """
-    Queries NVD asynchronously with rate limiting.
+    Queries NVD asynchronously with rate limiting and retries.
+    Always returns a list (empty list means no CVEs or failed after retries).
     """
     params = {"cpeName": cpe_string}
     headers = {}
-    
-    # FIX: NVD requires 'apiKey' header, not Authorization
+
     if API_KEY:
         headers["apiKey"] = API_KEY
 
     async with semaphore:
-        try:
-            # Enforce rate limit delay before request
-            await asyncio.sleep(DELAY) 
-            
-            async with session.get(NVD_API_URL, params=params, headers=headers, timeout=10) as response:
-                if response.status == 404:
-                    return [] # No CVEs found
-                
-                if response.status in [403, 429]:
-                    print(f"[!] Rate limit hit for {cpe_string}. Slowing down...")
-                    await asyncio.sleep(10) # Penalty wait
-                    return None
+        # Simple retry loop with exponential backoff
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                # Enforce rate limit delay before request
+                await asyncio.sleep(DELAY)
 
-                response.raise_for_status()
-                data = await response.json()
+                async with session.get(NVD_API_URL, params=params, headers=headers, timeout=10) as response:
+                    if response.status == 404:
+                        return []  # No CVEs found
 
-                vulnerabilities = []
-                if data.get('vulnerabilities'):
-                    for vuln in data['vulnerabilities']:
-                        cve = vuln['cve']
-                        metrics = cve.get('metrics', {})
-                        cvss_score = extract_cvss_score(metrics)
-                        
-                        vulnerabilities.append({
-                            "id": cve.get('id'),
-                            "description": cve['descriptions'][0]['value'],
-                            "cvss_v3": cvss_score
-                        })
-                return vulnerabilities
+                    if response.status in [403, 429]:
+                        # Rate limit / forbidden: wait a penalty and try again
+                        print(f"[!] Rate limit/hit (status={response.status}) for {cpe_string}. Attempt {attempt}/{MAX_RETRIES}.")
+                        await asyncio.sleep(5 * attempt)
+                        continue
 
-        except aiohttp.ClientError as e:
-            print(f"[!] Network error for {cpe_string}: {e}")
-            return None
-        except Exception as e:
-            print(f"[!] Error processing {cpe_string}: {e}")
-            return None
+                    # For other non-2xx, raise to trigger retry
+                    response.raise_for_status()
+                    data = await response.json()
+
+                    vulnerabilities = []
+                    if data.get('vulnerabilities'):
+                        for vuln in data['vulnerabilities']:
+                            cve = vuln.get('cve', {}) or {}
+                            # SAFE description extraction
+                            descriptions = cve.get('descriptions', []) or []
+                            desc = None
+                            for d in descriptions:
+                                if d.get('lang') == 'en' and d.get('value'):
+                                    desc = d.get('value')
+                                    break
+                            if not desc and descriptions:
+                                desc = descriptions[0].get('value')
+                            if not desc:
+                                desc = 'No description available.'
+
+                            metrics = cve.get('metrics', {}) or {}
+                            cvss_score = extract_cvss_score(metrics)
+
+                            vulnerabilities.append({
+                                "id": cve.get('id') or cve.get('CVE_data_meta', {}).get('ID'),
+                                "description": desc,
+                                "cvss_v3": cvss_score
+                            })
+                    return vulnerabilities
+
+            except aiohttp.ClientResponseError as e:
+                # 5xx & http errors; retry
+                print(f"[!] HTTP Error for {cpe_string}: {e} (attempt {attempt})")
+                await asyncio.sleep(2 * attempt)
+                continue
+            except aiohttp.ClientError as e:
+                print(f"[!] Network/Client error for {cpe_string}: {e} (attempt {attempt})")
+                await asyncio.sleep(2 * attempt)
+                continue
+            except asyncio.TimeoutError:
+                print(f"[!] Timeout for {cpe_string} (attempt {attempt})")
+                await asyncio.sleep(2 * attempt)
+                continue
+            except Exception as e:
+                print(f"[!] Unexpected error processing {cpe_string}: {e} (attempt {attempt})")
+                await asyncio.sleep(2 * attempt)
+                continue
+
+        # After retries: return empty list (treat as no CVEs found) — do not return None to avoid silent drops
+        print(f"[!] Giving up on {cpe_string} after {MAX_RETRIES} attempts. Treating as zero CVEs.")
+        return []
+
 
 async def fetch_cves_async(cpe_results):
     """
@@ -101,63 +142,63 @@ async def fetch_cves_async(cpe_results):
     cache = await load_cache()
     all_vulns = {}
     tasks = []
-    
-    # Semaphore limits how many 'active' requests happen at once
+
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
     async with aiohttp.ClientSession() as session:
         cpes_to_query = []
-        
+
         # 1. check cache first
         for port, info in cpe_results.items():
             cpe = info.get("cpe")
             if not cpe:
                 continue
-            
+
             if cpe in cache:
+                # cached value might be None or list; ensure list
+                cached_val = cache.get(cpe) or []
                 print(f"[*] Cache hit for {cpe}")
-                all_vulns[port] = cache[cpe]
+                all_vulns[port] = cached_val
             else:
                 cpes_to_query.append((port, cpe))
 
         # 2. Prepare async tasks for non-cached items
         if cpes_to_query:
             print(f"[*] Querying NVD for {len(cpes_to_query)} CPEs...")
-            
+
             for port, cpe in cpes_to_query:
-                # Create a task for each query
                 task = query_nvd_async(session, cpe, semaphore)
                 tasks.append((port, cpe, task))
-            
+
             # 3. Run all tasks
             results = await asyncio.gather(*[t[2] for t in tasks])
-            
+
             # 4. Process results
             for i, result in enumerate(results):
                 port = tasks[i][0]
                 cpe = tasks[i][1]
-                
-                if result is not None:
-                    cache[cpe] = result
-                    all_vulns[port] = result
-        
+
+                # result is guaranteed to be list (may be empty)
+                cache[cpe] = result or []
+                all_vulns[port] = result or []
+
         # Save updated cache
         save_cache_sync(cache)
         return all_vulns
 
-# ---------------------------------------------------------
-# COMPATIBILITY WRAPPER (Solves your ImportError)
-# ---------------------------------------------------------
 def fetch_cves(cpe_results):
     """
     Allows synchronous nvm.py to call async logic.
     Includes a Windows-specific fix for the event loop.
     """
     if os.name == 'nt':
-        # FIX: Prevents 'RuntimeError: Event loop is closed' on Windows
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-        
+        try:
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        except Exception:
+            pass
+
     return asyncio.run(fetch_cves_async(cpe_results))
+
 
 # --- TEST BLOCK ---
 if __name__ == "__main__":

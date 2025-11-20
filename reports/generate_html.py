@@ -2,99 +2,226 @@ import os
 import time
 from jinja2 import Template
 
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html>
+HTML_TEMPLATE = r"""
+<!doctype html>
+<html lang="en">
 <head>
-    <title>NVM Scan Report - {{ target }}</title>
-    <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 0; background-color: #f4f7f6; }
-        .container { width: 90%; margin: 40px auto; background: #ffffff; padding: 30px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1); }
-        .header { border-bottom: 2px solid #e0e0e0; padding-bottom: 20px; margin-bottom: 30px; }
-        h1 { color: #333; margin-top: 0; }
-        .badge { display: inline-block; padding: 6px 12px; border-radius: 4px; font-weight: bold; text-transform: uppercase; font-size: 14px; color: white; margin-right: 10px; }
-        .risk-HIGH { background-color: #e74c3c; }
-        .risk-MEDIUM { background-color: #f39c12; }
-        .risk-LOW { background-color: #2ecc71; }
-        .risk-NONE { background-color: #95a5a6; }
-        .table-container { margin-top: 20px; overflow-x: auto; }
-        table { width: 100%; border-collapse: collapse; margin-top: 15px; }
-        th, td { padding: 12px 15px; text-align: left; border-bottom: 1px solid #ddd; font-size: 14px; }
-        th { background-color: #34495e; color: white; font-weight: 600; }
-        tr:hover { background-color: #f8f8f8; }
-        .cve-list { font-size: 12px; line-height: 1.6; }
-        .cve-id { color: #3498db; text-decoration: none; font-weight: 500; }
-    </style>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>NVM Scan Report - {{ target }}</title>
+<style>
+  :root{
+    --bg:#f4f7f6; --card:#fff; --muted:#7f8c8d; --accent:#2b8cff;
+    --danger:#e74c3c; --warn:#f39c12; --ok:#2ecc71; --info:#95a5a6;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, "Roboto Mono", "Helvetica Neue", monospace;
+  }
+  body{font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, Arial; background:var(--bg); margin:0; padding:28px;}
+  .wrapper{max-width:1100px;margin:0 auto;}
+  .header{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:18px;}
+  .brand{display:flex;align-items:center;gap:14px;}
+  .logo{width:56px;height:56px;border-radius:8px;background:linear-gradient(135deg,#2b8cff,#7b61ff);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:18px;}
+  h1{margin:0;font-size:20px}
+  .meta{color:var(--muted);font-size:13px}
+  .cards{display:flex;gap:12px;margin-top:18px;flex-wrap:wrap;}
+  .card{background:var(--card);padding:14px;border-radius:10px;box-shadow:0 6px 20px rgba(30,40,50,0.06);min-width:160px;flex:1;}
+  .big{font-size:28px;font-weight:700}
+  .small{color:var(--muted);font-size:12px;margin-top:6px}
+  .badge{display:inline-block;padding:6px 10px;border-radius:999px;color:#fff;font-weight:600;font-size:12px}
+  .risk-CRITICAL{background:var(--danger)}
+  .risk-HIGH{background:#d64545}
+  .risk-MEDIUM{background:var(--warn)}
+  .risk-LOW{background:var(--ok)}
+  .risk-NONE{background:var(--info)}
+  .table-area{margin-top:22px}
+  .port-card{background:var(--card);border-radius:10px;padding:14px;margin-bottom:12px;box-shadow:0 6px 18px rgba(15,20,30,0.04)}
+  .port-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
+  .port-left{display:flex;gap:12px;align-items:center}
+  .port-id{background:#0f1724;color:#fff;padding:10px 12px;border-radius:8px;font-weight:700;font-family:var(--mono);font-size:14px}
+  .svc{font-weight:700}
+  .svc-sub{color:var(--muted);font-size:13px}
+  .meta-row{display:flex;gap:10px;align-items:center}
+  .actions{display:flex;gap:8px}
+  .btn{padding:8px 10px;border-radius:8px;border:none;font-weight:600;cursor:pointer;background:#eef3ff;color:#164fce}
+  .cve-list{margin-top:12px;padding-top:12px;border-top:1px dashed #eee}
+  .cve-row{display:flex;align-items:flex-start;gap:10px;padding:8px 0;border-bottom:1px solid #f3f3f3}
+  .cve-id{min-width:140px;color:var(--accent);font-weight:700;text-decoration:none}
+  .cve-desc{color:#333;font-size:13px;line-height:1.35}
+  .cve-meta{color:var(--muted);font-size:12px;margin-left:auto;white-space:nowrap}
+  .toggle{background:#fafafa;border:1px solid #eee;padding:8px;border-radius:8px;cursor:pointer}
+  .collapse{display:none}
+  .search{width:100%;padding:10px;border-radius:10px;border:1px solid #e6e9ee;margin-bottom:12px}
+  footer{margin-top:20px;color:var(--muted);font-size:13px;text-align:center}
+  @media (max-width:700px){ .cards{flex-direction:column} .port-head{flex-direction:column;align-items:flex-start} .cve-meta{margin-left:0} }
+</style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1>NVM Scan Report: {{ target }}</h1>
-            <p><strong>Scan Date:</strong> {{ scan_date }}</p>
-            <p><strong>Overall Risk:</strong> <span class="badge risk-{{ overall_risk }}">{{ overall_risk }}</span></p>
+  <div class="wrapper">
+    <div class="header">
+      <div class="brand">
+        <div class="logo">NVM</div>
+        <div>
+          <h1>NVM Scan Report — {{ target }}</h1>
+          <div class="meta">Scan date: {{ scan_date }} · Overall risk: <span class="badge risk-{{ overall_risk }}">{{ overall_risk }}</span></div>
+        </div>
+      </div>
+      <div>
+        <div class="small">Generated by NVM v1.0</div>
+      </div>
+    </div>
+
+    <div class="cards">
+      <div class="card">
+        <div class="small">Open Ports</div>
+        <div class="big">{{ results|length }}</div>
+      </div>
+      <div class="card">
+        <div class="small">Total CVEs</div>
+        <div class="big">{{ total_cves }}</div>
+      </div>
+      <div class="card">
+        <div class="small">Top Risk</div>
+        <div class="big"><span class="badge risk-{{ overall_risk }}">{{ overall_risk }}</span></div>
+      </div>
+      <div class="card">
+        <div class="small">Target</div>
+        <div class="big" style="font-family:var(--mono)">{{ target }}</div>
+      </div>
+    </div>
+
+    <div style="margin-top:18px">
+      <input id="search" class="search" placeholder="Filter CVEs or ports (type and press Enter) — example: CVE-2020 OR 22" />
+    </div>
+
+    <div class="table-area">
+      {% for port, info in results.items()|sort(attribute=0, reverse=false) %}
+      <div class="port-card" data-port="{{ port }}">
+        <div class="port-head">
+          <div class="port-left">
+            <div class="port-id">:{{ port }}</div>
+            <div>
+              <div class="svc">{{ info.service if info.service else 'unknown' }}</div>
+              <div class="svc-sub">{{ info.version if info.version else '' }}</div>
+              <div class="svc-sub">CPE: {{ info.cpe if info.cpe else 'N/A' }}</div>
+            </div>
+          </div>
+          <div class="meta-row">
+            <div style="margin-right:12px"><span class="badge risk-{{ info.risk }}">{{ info.risk }}</span></div>
+            <div class="actions">
+              <button class="btn toggle" data-target="list-{{ port }}">Toggle CVEs ({{ info.vulnerabilities|length }})</button>
+              <button class="btn" onclick="copyCves('{{ port }}')">Copy IDs</button>
+            </div>
+          </div>
         </div>
 
-        <h2>Vulnerability Summary</h2>
-        <div class="table-container">
-            <table>
-                <thead>
-                    <tr>
-                        <th>Port</th>
-                        <th>Service/Version</th>
-                        <th>Risk</th>
-                        <th>CPE String</th>
-                        <th>Vulnerabilities Found</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for port, info in results.items() %}
-                    <tr>
-                        <td><strong>{{ port }}</strong></td>
-                        <td>{{ info.service }} ({{ info.version }})</td>
-                        <td><span class="badge risk-{{ info.risk }}">{{ info.risk }}</span></td>
-                        <td>{{ info.cpe if info.cpe else 'N/A' }}</td>
-                        <td>
-                            <div class="cve-list">
-                            {% if info.vulnerabilities %}
-                                {% for vuln in info.vulnerabilities %}
-                                    <a class="cve-id" href="https://nvd.nist.gov/vuln/detail/{{ vuln.id }}" target="_blank">{{ vuln.id }}</a> (CVSS: {{ vuln.cvss_v3 }})<br>
-                                {% endfor %}
-                            {% else %}
-                                None found.
-                            {% endif %}
-                            </div>
-                        </td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
+        <div id="list-{{ port }}" class="cve-list collapse">
+          {% if info.vulnerabilities and info.vulnerabilities|length > 0 %}
+            {% for vuln in info.vulnerabilities %}
+            <div class="cve-row" data-cve="{{ vuln.id }}">
+              <a class="cve-id" href="https://nvd.nist.gov/vuln/detail/{{ vuln.id }}" target="_blank">{{ vuln.id }}</a>
+              <div class="cve-desc">{{ vuln.description }}</div>
+              <div class="cve-meta">CVSS: {{ vuln.cvss_v3 if vuln.cvss_v3 is not none else 'N/A' }}</div>
+            </div>
+            {% endfor %}
+          {% else %}
+            <div class="cve-row"><div class="cve-desc">No vulnerabilities found for this service.</div></div>
+          {% endif %}
         </div>
-        <p style="margin-top: 50px; text-align: center; color: #7f8c8d;">Report generated by NVM v1.0 (Network Vulnerability Manager)</p>
+      </div>
+      {% endfor %}
     </div>
+
+    <footer>
+      Report generated: {{ scan_date }} · Format: HTML · Tool: Network Vulnerability Manager v1.0
+    </footer>
+  </div>
+
+<script>
+  // Basic accordion + search + copy helper
+  document.querySelectorAll('.toggle').forEach(btn=>{
+    btn.addEventListener('click', ()=> {
+      const id = btn.getAttribute('data-target');
+      const el = document.getElementById(id);
+      if(!el) return;
+      el.style.display = (el.style.display === 'block') ? 'none' : 'block';
+    });
+  });
+
+  function copyCves(port){
+    const list = document.querySelectorAll(`[data-port="${port}"] .cve-row`);
+    const ids = [];
+    list.forEach(r=>{
+      const id = r.getAttribute('data-cve');
+      if(id) ids.push(id);
+    });
+    if(ids.length === 0) {
+      navigator.clipboard.writeText('').then(()=>alert('No CVE IDs to copy.'));
+      return;
+    }
+    navigator.clipboard.writeText(ids.join('\\n')).then(()=> {
+      const btn = document.querySelector(`[data-port="${port}"] .btn`);
+      // tiny feedback
+      btn.textContent = 'Copied';
+      setTimeout(()=> btn.textContent = 'Copy IDs', 1200);
+    });
+  }
+
+  // simple search (enter to filter)
+  document.getElementById('search').addEventListener('keydown', function(e){
+    if(e.key === 'Enter'){
+      const q = this.value.trim().toLowerCase();
+      document.querySelectorAll('.port-card').forEach(card=>{
+        let show = false;
+        if(!q) show = true;
+        const port = card.getAttribute('data-port');
+        if(port.indexOf(q) !== -1) show = true;
+        // scan CVE ids and descriptions
+        card.querySelectorAll('.cve-row').forEach(r=>{
+          const cve = (r.getAttribute('data-cve')||'').toLowerCase();
+          const txt = (r.innerText||'').toLowerCase();
+          if(cve.indexOf(q) !== -1 || txt.indexOf(q) !== -1) show = true;
+        });
+        card.style.display = show ? 'block' : 'none';
+      });
+    }
+  });
+</script>
 </body>
 </html>
 """
 
 def create_html_report(overall_risk, final_results, target):
-    template = Template(HTML_TEMPLATE)
-    
-    # We convert the dictionary keys to strings to make them available in Jinja2 iteration
-    # Since final_results is already a dictionary, we just need to pass the context.
+    """
+    Creates a modern HTML report with collapsible CVE lists.
+    - overall_risk: string (e.g., 'CRITICAL')
+    - final_results: dict keyed by port (int or string) -> info dict with service, version, cpe, risk, vulnerabilities
+    - target: target IP/hostname string
+    Returns the filename saved (basename).
+    """
+    # Ensure results keys are strings for Jinja iteration and stable ordering
+    results = {}
+    for k, v in final_results.items():
+        results[str(k)] = v
 
-    rendered_html = template.render(
+    # compute totals
+    total_cves = 0
+    for info in results.values():
+        vulns = info.get('vulnerabilities') or []
+        total_cves += len(vulns)
+
+    template = Template(HTML_TEMPLATE)
+    rendered = template.render(
         target=target,
         scan_date=time.strftime("%Y-%m-%d %H:%M:%S"),
         overall_risk=overall_risk,
-        results=final_results
+        results=results,
+        total_cves=total_cves
     )
-    
+
     filename = f"NVM-Report-{target}.html"
-    filepath = os.path.join("reports", filename)
-    
-    if not os.path.exists("reports"):
-        os.makedirs("reports")
-        
-    with open(filepath, 'w', encoding='utf-8') as f:
-        f.write(rendered_html)
-        
+    outdir = os.path.join("reports")
+    os.makedirs(outdir, exist_ok=True)
+    path = os.path.join(outdir, filename)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(rendered)
+
     return filename
